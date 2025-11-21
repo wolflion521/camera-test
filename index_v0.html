@@ -1,0 +1,229 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>手机摄像头调用测试</title>
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background-color: #000;
+            display: flex;
+            flex-direction: column;
+            height: 100vh;
+            color: white;
+        }
+
+        /* 视频区域 */
+        .video-container {
+            flex: 1;
+            position: relative;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            overflow: hidden;
+            background: #222;
+        }
+
+        video {
+            width: 100%;
+            height: 100%;
+            object-fit: cover; /* 保持比例充满屏幕 */
+        }
+
+        /* 控制面板 */
+        .controls {
+            padding: 20px;
+            background-color: rgba(0, 0, 0, 0.8);
+            display: flex;
+            flex-direction: column;
+            gap: 15px;
+            z-index: 10;
+        }
+
+        select, button {
+            padding: 12px;
+            font-size: 16px;
+            border-radius: 8px;
+            border: none;
+            outline: none;
+        }
+
+        select {
+            background: #333;
+            color: white;
+            border: 1px solid #555;
+        }
+
+        button {
+            background-color: #007AFF; /* 苹果蓝 */
+            color: white;
+            font-weight: bold;
+            cursor: pointer;
+        }
+
+        button:active {
+            background-color: #0056b3;
+        }
+
+        button.stop {
+            background-color: #ff3b30;
+        }
+
+        /* 错误提示 */
+        #errorMsg {
+            color: #ff3b30;
+            font-size: 14px;
+            text-align: center;
+            padding: 0 10px;
+            display: none;
+        }
+    </style>
+</head>
+<body>
+
+    <div class="video-container">
+        <!-- playsinline 是 iOS 必须的，否则会强制全屏 -->
+        <video id="video" autoplay playsinline muted></video>
+    </div>
+
+    <div id="errorMsg"></div>
+
+    <div class="controls">
+        <label for="cameraSelect">选择摄像头:</label>
+        <select id="cameraSelect">
+            <option value="" disabled selected>正在获取摄像头...</option>
+        </select>
+        
+        <button id="toggleBtn" onclick="toggleCamera()">开启摄像头</button>
+    </div>
+
+    <script>
+        const videoElement = document.getElementById('video');
+        const cameraSelect = document.getElementById('cameraSelect');
+        const toggleBtn = document.getElementById('toggleBtn');
+        const errorMsg = document.getElementById('errorMsg');
+        
+        let currentStream = null;
+        let isStreaming = false;
+
+        // 页面加载时获取摄像头列表
+        async function getCameras() {
+            try {
+                // 先请求一次权限，否则 enumerateDevices 可能会返回空的 label
+                await navigator.mediaDevices.getUserMedia({ video: true });
+                
+                // 获取设备列表
+                const devices = await navigator.mediaDevices.enumerateDevices();
+                const videoDevices = devices.filter(device => device.kind === 'videoinput');
+
+                cameraSelect.innerHTML = ''; // 清空列表
+
+                if (videoDevices.length === 0) {
+                    showError("未检测到摄像头");
+                    return;
+                }
+
+                videoDevices.forEach((device, index) => {
+                    const option = document.createElement('option');
+                    option.value = device.deviceId;
+                    // 如果设备没有标签（通常是因为没权限），就给个默认名字
+                    option.text = device.label || `摄像头 ${index + 1} (${index === 0 ? '通常是后置' : '通常是前置'})`;
+                    cameraSelect.appendChild(option);
+                });
+                
+                // 监听下拉菜单变化
+                cameraSelect.onchange = () => {
+                    if (isStreaming) {
+                        startCamera(cameraSelect.value);
+                    }
+                };
+
+                // 停止刚才为了获取权限打开的流
+                stopMediaTracks(videoElement.srcObject);
+
+            } catch (err) {
+                showError("无法获取摄像头列表: " + err.message);
+                console.error(err);
+            }
+        }
+
+        // 开启或切换摄像头
+        async function startCamera(deviceId) {
+            // 如果已经有流在运行，先停止
+            if (currentStream) {
+                stopMediaTracks(currentStream);
+            }
+
+            const constraints = {
+                video: {
+                    deviceId: deviceId ? { exact: deviceId } : undefined,
+                    // 默认首选参数：高清，优先尝试后置
+                    width: { ideal: 1280 },
+                    height: { ideal: 720 },
+                    facingMode: deviceId ? undefined : 'environment' 
+                },
+                audio: false
+            };
+
+            try {
+                const stream = await navigator.mediaDevices.getUserMedia(constraints);
+                currentStream = stream;
+                videoElement.srcObject = stream;
+                isStreaming = true;
+                toggleBtn.textContent = "关闭摄像头";
+                toggleBtn.classList.add('stop');
+                errorMsg.style.display = 'none';
+            } catch (err) {
+                showError("摄像头启动失败: " + err.message);
+            }
+        }
+
+        // 停止所有轨道
+        function stopMediaTracks(stream) {
+            if (stream) {
+                stream.getTracks().forEach(track => {
+                    track.stop();
+                });
+            }
+        }
+
+        // 按钮点击事件
+        function toggleCamera() {
+            if (isStreaming) {
+                stopMediaTracks(currentStream);
+                videoElement.srcObject = null;
+                isStreaming = false;
+                toggleBtn.textContent = "开启摄像头";
+                toggleBtn.classList.remove('stop');
+            } else {
+                const selectedDeviceId = cameraSelect.value;
+                startCamera(selectedDeviceId);
+            }
+        }
+
+        function showError(msg) {
+            errorMsg.textContent = msg;
+            errorMsg.style.display = 'block';
+        }
+
+        // 初始化
+        // 注意：很多浏览器要求用户产生交互（点击）后才能播放视频，
+        // 所以我们在点击按钮时才真正请求摄像头，但页面加载时我们尝试获取列表。
+        // 为了用户体验，我们先添加一个点击事件来触发权限请求
+        toggleBtn.addEventListener('click', () => {
+             if(cameraSelect.options.length <= 1 && !isStreaming) {
+                 getCameras().then(() => {
+                     // 获取列表后自动开启第一个
+                     if(cameraSelect.options.length > 0) {
+                         startCamera(cameraSelect.value);
+                     }
+                 });
+             }
+        }, {once: true}); // 只执行一次
+
+    </script>
+</body>
+</html>
