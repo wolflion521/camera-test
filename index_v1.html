@@ -1,0 +1,359 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>iPhone 17 实时视频流 VLM 监控</title>
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background-color: #000;
+            display: flex;
+            flex-direction: column;
+            height: 100vh;
+            color: white;
+            overflow: hidden;
+        }
+
+        /* 视频区域 */
+        .video-wrapper {
+            flex: 1;
+            position: relative;
+            background: #111;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+
+        video {
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+        }
+
+        /* 实时监控的红点动画 */
+        @keyframes blink { 50% { opacity: 0; } }
+        .recording-indicator {
+            display: inline-block;
+            width: 10px;
+            height: 10px;
+            background-color: red;
+            border-radius: 50%;
+            animation: blink 1s infinite;
+            margin-right: 5px;
+            vertical-align: middle;
+            display: none; /* 默认隐藏 */
+        }
+
+        /* 悬浮信息面板 */
+        .hud-overlay {
+            position: absolute;
+            top: 20px;
+            left: 20px;
+            right: 20px;
+            background: rgba(0, 0, 0, 0.6);
+            backdrop-filter: blur(5px);
+            padding: 15px;
+            border-radius: 12px;
+            pointer-events: none;
+            border: 1px solid rgba(255,255,255,0.1);
+        }
+
+        .hud-header {
+            display: flex;
+            justify-content: space-between;
+            font-size: 12px;
+            color: #aaa;
+            margin-bottom: 5px;
+        }
+
+        #ai-result {
+            font-size: 18px;
+            font-weight: bold;
+            color: white;
+            text-shadow: 0 1px 2px black;
+            min-height: 24px;
+        }
+
+        #fps-counter {
+            font-family: monospace;
+            color: #00ff00;
+        }
+
+        /* 底部控制栏 */
+        .controls {
+            background: rgba(20, 20, 20, 0.95);
+            padding: 20px 20px 40px 20px; /* 底部留多点给 iPhone Home 条 */
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+            border-top: 1px solid #333;
+            z-index: 20;
+        }
+
+        .row { display: flex; gap: 10px; }
+
+        button {
+            padding: 14px;
+            font-size: 16px;
+            border-radius: 12px;
+            border: none;
+            font-weight: 600;
+            cursor: pointer;
+            flex: 1;
+            transition: all 0.2s;
+        }
+
+        .btn-primary { background: #007AFF; color: white; }
+        .btn-success { background: #34C759; color: white; }
+        .btn-danger { background: #FF3B30; color: white; }
+        .btn-stop { background: #FF453A; color: white; border: 2px solid #FF453A; }
+        
+        button:disabled { opacity: 0.4; cursor: not-allowed; }
+
+        /* 进度条 */
+        .progress-container {
+            height: 4px;
+            background: #333;
+            border-radius: 2px;
+            overflow: hidden;
+            margin-top: 5px;
+        }
+        .progress-bar {
+            height: 100%;
+            background: #0A84FF;
+            width: 0%;
+            transition: width 0.2s;
+        }
+
+    </style>
+</head>
+<body>
+
+    <div class="video-wrapper">
+        <video id="video" autoplay playsinline muted></video>
+        
+        <div class="hud-overlay">
+            <div class="hud-header">
+                <span><div id="rec-dot" class="recording-indicator"></div>AI 监控中</span>
+                <span id="fps-counter">Latency: -- ms</span>
+            </div>
+            <div id="ai-status" style="font-size: 12px; color: #888; margin-bottom: 4px;">等待模型加载...</div>
+            <div id="ai-result">---</div>
+            <div class="progress-container"><div id="load-progress" class="progress-bar"></div></div>
+        </div>
+    </div>
+
+    <div class="controls">
+        <div class="row">
+            <button id="camBtn" class="btn-primary" onclick="toggleCamera()">开启相机</button>
+        </div>
+        <div class="row">
+            <button id="loadBtn" class="btn-success" onclick="initWebLLM()">1. 加载大脑 (2.2GB)</button>
+            <button id="monitorBtn" class="btn-primary" onclick="toggleMonitoring()" disabled>2. 开始实时监控</button>
+        </div>
+    </div>
+
+    <script type="module">
+        import * as webllm from "https://esm.run/@mlc-ai/web-llm";
+
+        // 配置：使用 Phi-3.5 Vision (速度最快)
+        const selectedModel = "Phi-3.5-vision-instruct-q4f16_1-MLC";
+        
+        let engine = null;
+        let isMonitoring = false;
+        let isInferencing = false; // 推理锁：防止并发
+        
+        // 1. 初始化模型
+        window.initWebLLM = async function() {
+            const loadBtn = document.getElementById('loadBtn');
+            const statusLabel = document.getElementById('ai-status');
+            const progressBar = document.getElementById('load-progress');
+            const monitorBtn = document.getElementById('monitorBtn');
+
+            if (engine) return; // 防止重复点
+
+            loadBtn.disabled = true;
+            loadBtn.innerText = "下载中...";
+            statusLabel.innerText = "正在初始化 WebGPU...";
+
+            try {
+                engine = await webllm.CreateMLCEngine(
+                    selectedModel,
+                    { 
+                        initProgressCallback: (report) => {
+                            statusLabel.innerText = report.text;
+                            if(report.progress) {
+                                progressBar.style.width = (report.progress * 100) + "%";
+                            }
+                        }
+                    }
+                );
+
+                statusLabel.innerText = "模型就绪。空闲。";
+                statusLabel.style.color = "#4CAF50";
+                loadBtn.innerText = "AI 已就绪";
+                progressBar.style.width = "100%";
+                
+                monitorBtn.disabled = false;
+                monitorBtn.classList.remove('btn-primary');
+                monitorBtn.classList.add('btn-success');
+
+            } catch (err) {
+                console.error(err);
+                statusLabel.innerText = "加载失败: " + err.message;
+                loadBtn.innerText = "重试";
+                loadBtn.disabled = false;
+            }
+        };
+
+        // 2. 监控循环逻辑 (核心修改)
+        window.toggleMonitoring = function() {
+            const btn = document.getElementById('monitorBtn');
+            const dot = document.getElementById('rec-dot');
+            
+            if (!isMonitoring) {
+                // 开启监控
+                isMonitoring = true;
+                btn.innerText = "停止监控";
+                btn.classList.remove('btn-success');
+                btn.classList.add('btn-stop');
+                dot.style.display = "inline-block";
+                
+                // 启动循环
+                runInferenceLoop();
+                
+            } else {
+                // 停止监控
+                isMonitoring = false;
+                btn.innerText = "2. 开始实时监控";
+                btn.classList.remove('btn-stop');
+                btn.classList.add('btn-success');
+                dot.style.display = "none";
+                document.getElementById('ai-status').innerText = "监控已暂停";
+            }
+        };
+
+        // 递归循环函数
+        async function runInferenceLoop() {
+            if (!isMonitoring) return;
+
+            // 如果上一帧还在算，就跳过这一帧，防止卡死
+            if (isInferencing) {
+                requestAnimationFrame(runInferenceLoop);
+                return;
+            }
+
+            const statusLabel = document.getElementById('ai-status');
+            const resultLabel = document.getElementById('ai-result');
+            const fpsLabel = document.getElementById('fps-counter');
+            const video = document.getElementById('video');
+
+            // 检查视频是否准备好
+            if (!video.videoWidth) {
+                requestAnimationFrame(runInferenceLoop);
+                return;
+            }
+
+            try {
+                isInferencing = true; // 上锁
+                const startTime = performance.now();
+                statusLabel.innerText = "👀 正在观察...";
+
+                // --- 截帧 ---
+                const canvas = document.createElement('canvas');
+                // 降低分辨率以提高速度 (手机端建议不要超过 640x480)
+                canvas.width = 640; 
+                canvas.height = 480;
+                const ctx = canvas.getContext('2d');
+                ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+                const dataUrl = canvas.toDataURL('image/jpeg', 0.5); // 50% 质量压缩
+
+                // --- 构造 Prompt ---
+                // 关键：保持 Prompt 简短，且 JSON 格式方便解析
+                const messages = [
+                    {
+                        role: "user",
+                        content: [
+                            { 
+                                type: "text", 
+                                text: "Analyze image. Is child safe? Format: [SAFE] or [DANGER] reason." 
+                            },
+                            { 
+                                type: "image_url", 
+                                image_url: { url: dataUrl } 
+                            }
+                        ]
+                    }
+                ];
+
+                // --- 推理 ---
+                const reply = await engine.chat.completions.create({
+                    messages,
+                    temperature: 0.0, // 0.0 最稳定
+                    max_tokens: 64,   // 极短输出，只求结果
+                });
+
+                const text = reply.choices[0].message.content;
+                
+                // --- 更新 UI ---
+                const endTime = performance.now();
+                const latency = Math.round(endTime - startTime);
+                
+                fpsLabel.innerText = `Latency: ${latency}ms`;
+                resultLabel.innerText = text;
+
+                if (text.toUpperCase().includes("DANGER") || text.toUpperCase().includes("UNSAFE")) {
+                    resultLabel.style.color = "#FF3B30"; // 红色警告
+                } else {
+                    resultLabel.style.color = "#34C759"; // 绿色安全
+                }
+
+            } catch (err) {
+                console.error(err);
+                resultLabel.innerText = "Error: " + err.message;
+            } finally {
+                isInferencing = false; // 解锁
+                
+                // 策略：根据性能自动调节
+                // 如果你想让手机休息一下，可以在这里加 setTimeout
+                // 目前逻辑是：算完这一帧，立刻算下一帧 (全力跑)
+                if (isMonitoring) {
+                    // 留 500ms 冷却时间，防止手机过热
+                    setTimeout(runInferenceLoop, 500); 
+                }
+            }
+        }
+
+        // 摄像头逻辑 (保持不变)
+        const videoElement = document.getElementById('video');
+        const camBtn = document.getElementById('camBtn');
+        let stream = null;
+
+        window.toggleCamera = async function() {
+            if (stream) {
+                stream.getTracks().forEach(t => t.stop());
+                videoElement.srcObject = null;
+                stream = null;
+                camBtn.innerText = "开启相机";
+                camBtn.classList.remove('btn-danger');
+                camBtn.classList.add('btn-primary');
+                return;
+            }
+            try {
+                stream = await navigator.mediaDevices.getUserMedia({ 
+                    video: { facingMode: 'environment' } 
+                });
+                videoElement.srcObject = stream;
+                camBtn.innerText = "关闭相机";
+                camBtn.classList.remove('btn-primary');
+                camBtn.classList.add('btn-danger');
+            } catch (e) {
+                alert("相机权限失败");
+            }
+        }
+    </script>
+</body>
+</html>
